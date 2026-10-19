@@ -12,6 +12,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#08070b;col
 progress{width:min(340px,80vw);height:10px;accent-color:#b600ff;justify-self:center}
 #port-intro{position:fixed;inset:0;z-index:10;background:#000;display:grid;place-items:center}
 #port-intro img{width:100%;height:100%;object-fit:contain;position:absolute}
+#retry{justify-self:center;padding:10px 22px;font:inherit;color:#fff;background:#b600ff;border:0;border-radius:6px;cursor:pointer}
 #error{max-width:650px;padding:20px;white-space:pre-wrap;color:#ffb8c6}
 </style>
 </head>
@@ -68,20 +69,47 @@ function beginIntro(){if(introScheduled)return;introScheduled=true;setTimeout(()
 if(art.complete)beginIntro();else{art.addEventListener('load',beginIntro,{once:true});art.addEventListener('error',beginIntro,{once:true});}
 const manifest={"loaderUrl": "Build/build.loader.js", "frameworkUrl": "Build/build.framework.js", "dataUrl": {"parts": ["chunks/build.data.part001", "chunks/build.data.part002", "chunks/build.data.part003", "chunks/build.data.part004", "chunks/build.data.part005", "chunks/build.data.part006", "chunks/build.data.part007", "chunks/build.data.part008", "chunks/build.data.part009", "chunks/build.data.part010", "chunks/build.data.part011", "chunks/build.data.part012", "chunks/build.data.part013", "chunks/build.data.part014", "chunks/build.data.part015", "chunks/build.data.part016", "chunks/build.data.part017", "chunks/build.data.part018", "chunks/build.data.part019", "chunks/build.data.part020", "chunks/build.data.part021", "chunks/build.data.part022", "chunks/build.data.part023", "chunks/build.data.part024", "chunks/build.data.part025", "chunks/build.data.part026", "chunks/build.data.part027", "chunks/build.data.part028", "chunks/build.data.part029", "chunks/build.data.part030", "chunks/build.data.part031", "chunks/build.data.part032", "chunks/build.data.part033", "chunks/build.data.part034", "chunks/build.data.part035", "chunks/build.data.part036", "chunks/build.data.part037", "chunks/build.data.part038", "chunks/build.data.part039", "chunks/build.data.part040", "chunks/build.data.part041", "chunks/build.data.part042", "chunks/build.data.part043", "chunks/build.data.part044", "chunks/build.data.part045", "chunks/build.data.part046", "chunks/build.data.part047", "chunks/build.data.part048", "chunks/build.data.part049", "chunks/build.data.part050"], "type": "application/octet-stream", "label": "build.data"}, "codeUrl": {"parts": ["chunks/build.wasm.part001", "chunks/build.wasm.part002", "chunks/build.wasm.part003", "chunks/build.wasm.part004", "chunks/build.wasm.part005", "chunks/build.wasm.part006", "chunks/build.wasm.part007", "chunks/build.wasm.part008", "chunks/build.wasm.part009", "chunks/build.wasm.part010", "chunks/build.wasm.part011", "chunks/build.wasm.part012", "chunks/build.wasm.part013", "chunks/build.wasm.part014", "chunks/build.wasm.part015", "chunks/build.wasm.part016", "chunks/build.wasm.part017", "chunks/build.wasm.part018", "chunks/build.wasm.part019"], "type": "application/wasm", "label": "build.wasm"}};
 const objectUrls=[];
-async function assetUrl(asset){
- if(typeof asset==='string')return asset;
- const parts=[];
- for(let i=0;i<asset.parts.length;i++){
-  const response=await fetch(asset.parts[i]);
-  if(!response.ok)throw new Error('Could not load '+asset.parts[i]+' (HTTP '+response.status+')');
-  parts.push(await response.blob());
-  document.getElementById('status').textContent='Loading '+asset.label+'… '+Math.round((i+1)/asset.parts.length*100)+'%';
+// Parts are cached so a reload or retry resumes instead of starting over, and
+// each part is retried because one dropped connection in a ~1 GB download is
+// otherwise fatal ("Failed to fetch").
+// Bump the version whenever the game build changes so stale parts are not reused.
+const CACHE_NAME='gwyf-build-v1';
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function openCache(){try{return window.caches?await caches.open(CACHE_NAME):null;}catch{return null;}}
+async function fetchPart(url,cache){
+ if(cache){try{const hit=await cache.match(url);if(hit)return await hit.blob();}catch{}}
+ let lastError;
+ for(let attempt=0;attempt<6;attempt++){
+  if(attempt)await sleep(Math.min(1000*2**attempt,15000));
+  try{
+   const response=await fetch(url,{cache:'no-store'});
+   if(!response.ok){lastError=new Error('Could not load '+url+' (HTTP '+response.status+')');if(response.status===404)break;continue;}
+   const blob=await response.blob();
+   if(cache){try{await cache.put(url,new Response(blob,{headers:{'Content-Type':'application/octet-stream'}}));}catch{}}
+   return blob;
+  }catch(error){lastError=error;}
  }
+ throw new Error((lastError&&lastError.message||'Network error')+' while downloading '+url+'. Check your connection and try again.');
+}
+async function assetUrl(asset,cache){
+ if(typeof asset==='string')return asset;
+ const parts=new Array(asset.parts.length);let done=0,next=0;
+ const worker=async()=>{
+  while(next<asset.parts.length){
+   const i=next++;
+   parts[i]=await fetchPart(asset.parts[i],cache);
+   done++;
+   document.getElementById('status').textContent='Loading '+asset.label+'… '+Math.round(done/asset.parts.length*100)+'%';
+   document.getElementById('progress').value=done/asset.parts.length;
+  }
+ };
+ await Promise.all(Array.from({length:Math.min(3,asset.parts.length)},worker));
  const url=URL.createObjectURL(new Blob(parts,{type:asset.type}));objectUrls.push(url);return url;
 }
 async function start(){
  const config={companyName:'CamzzzWebPorts',productName:'Gamble With Your Friends - Solo Web Port',productVersion:'1.0',streamingAssetsUrl:'StreamingAssets',devicePixelRatio:1,autoSyncPersistentDataPath:true};
- for(const key of ['dataUrl','frameworkUrl','codeUrl'])config[key]=await assetUrl(manifest[key]);
+ const cache=await openCache();
+ for(const key of ['dataUrl','frameworkUrl','codeUrl'])config[key]=await assetUrl(manifest[key],cache);
  config.showBanner=(message,type)=>console[type==='error'?'error':'warn'](message);
  const loader=document.createElement('script');loader.src=manifest.loaderUrl;
  await new Promise((resolve,reject)=>{loader.onload=resolve;loader.onerror=()=>reject(new Error('Could not load the Unity launcher.'));document.body.appendChild(loader);});
@@ -90,7 +118,15 @@ async function start(){
  document.getElementById('loading').remove();canvas.focus();
  for(const url of objectUrls)URL.revokeObjectURL(url);
 }
-start().catch(error=>{console.error(error);document.getElementById('status').textContent='The game could not start';const panel=document.getElementById('error');panel.hidden=false;panel.textContent=error.message;});
+start().catch(error=>{
+ console.error(error);
+ for(const url of objectUrls)URL.revokeObjectURL(url);
+ document.getElementById('status').textContent='The game could not start';
+ const panel=document.getElementById('error');panel.hidden=false;panel.textContent=error.message;
+ const retry=document.createElement('button');retry.textContent='Try again';retry.id='retry';
+ retry.addEventListener('click',()=>location.reload());
+ document.getElementById('loading').appendChild(retry);
+});
 canvas.addEventListener('pointerdown',()=>canvas.focus());
 window.addEventListener('keydown',event=>{if(document.activeElement===canvas&&['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.code))event.preventDefault();});
 </script>
