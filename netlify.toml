@@ -1,0 +1,8 @@
+[build]
+  publish = "."
+
+# The game lives in /game/; send visitors to it from the site root.
+[[redirects]]
+  from = "/"
+  to = "/game/"
+  status = 302
